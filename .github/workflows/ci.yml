@@ -1,0 +1,189 @@
+name: Day 2 CI
+
+run-name: "Day 2 CI - triggered by ${{ github.actor }}"
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      python-version:
+        description: "Python version to use"
+        type: choice
+        options:
+          - "3.12"
+          - "3.13"
+        default: "3.13"
+      create-package:
+        description: "Build and verify the package"
+        type: boolean
+        default: true
+  schedule:
+    - cron: "0 7 * * 1"
+
+env:
+  APP_NAME: temperature
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version || '3.13' }}
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: pytest -v --junitxml=reports/junit.xml
+
+      - name: Report test failure
+        if: failure()
+        env:
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          echo "🚨 Tests failed on ${BRANCH}"
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report
+          path: reports/junit.xml
+          if-no-files-found: warn
+          retention-days: 5
+
+  package:
+    name: Package
+    needs: test
+    if: ${{ needs.test.result == 'success' && (github.event_name != 'workflow_dispatch' || inputs.create-package) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute version
+        id: version
+        env:
+          RUN_NUMBER: ${{ github.run_number }}
+        run: echo "version=0.1.${RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+
+      - name: Build package
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          mkdir -p dist
+          tar -czf "dist/${APP_NAME}-${VERSION}.tar.gz" temperature.py README.md
+          ls -l dist
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: package
+          path: dist/temperature-*.tar.gz
+          if-no-files-found: error
+          retention-days: 5
+
+  verify:
+    name: Verify
+    needs: package
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download package
+        uses: actions/download-artifact@v4
+        with:
+          name: package
+          path: pkg
+
+      - name: Extract and verify
+        run: |
+          mkdir -p verify
+          tar -xzf pkg/temperature-*.tar.gz -C verify
+          cd verify
+          python3 -c "from temperature import celsius_to_fahrenheit as c; assert c(100) == 212; print('Package OK')"
+
+  report:
+    name: Report
+    needs: [test, package]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      NOTIFY_SET: ${{ secrets.NOTIFY_TOKEN != '' }}
+    steps:
+      - name: Write job summary
+        env:
+          TITLE: ${{ vars.REPORT_TITLE || 'Day 2 CI Report' }}
+          VERSION: ${{ needs.package.outputs.version }}
+          SHA: ${{ github.sha }}
+          EVENT: ${{ github.event_name }}
+          TEST_RESULT: ${{ needs.test.result }}
+          PACKAGE_RESULT: ${{ needs.package.result }}
+        run: |
+          version="${VERSION:-n/a}"
+          short_sha="${SHA:0:7}"
+          {
+            echo "## ${TITLE}"
+            echo ""
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| App | ${APP_NAME} |"
+            echo "| Version | ${version} |"
+            echo "| Commit | ${short_sha} |"
+            echo "| Event | ${EVENT} |"
+            echo "| test | ${TEST_RESULT} |"
+            echo "| package | ${PACKAGE_RESULT} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Print upstream results
+        env:
+          TEST_RESULT: ${{ needs.test.result }}
+          PACKAGE_RESULT: ${{ needs.package.result }}
+        run: |
+          echo "test:    ${TEST_RESULT}"
+          echo "package: ${PACKAGE_RESULT}"
+
+      - name: Notify
+        if: env.NOTIFY_SET == 'true'
+        env:
+          NOTIFY_TOKEN: ${{ secrets.NOTIFY_TOKEN }}
+        run: |
+          echo "Notification sent (token length: ${#NOTIFY_TOKEN})"
+
+  pr-comment:
+    name: PR Comment
+    needs: package
+    if: ${{ github.event_name == 'pull_request' && needs.package.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Comment on PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          VERSION: ${{ needs.package.outputs.version }}
+        run: |
+          gh pr comment "$PR_NUMBER" --body "✅ CI passed. Package version ${VERSION} is ready."

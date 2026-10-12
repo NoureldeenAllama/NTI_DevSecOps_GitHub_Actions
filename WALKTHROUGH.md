@@ -456,6 +456,7 @@ says 'a newer tool exists, want it?'"
         with:
           python-version: ${{ inputs.python-version || '3.13' }}
           cache: pip
+          cache-dependency-path: requirements-dev.txt
 ```
 
 - `uses:` → run a prebuilt action instead of a shell command.
@@ -839,10 +840,14 @@ source tree — exactly what a real consumer would download.
         with:
           python-version: ${{ inputs.python-version || '3.13' }}
           cache: pip
+          cache-dependency-path: requirements-dev.txt
 ```
 
-`cache: pip` keys the cache on `requirements-dev.txt`, so unchanged deps are
-restored instantly.
+`cache: pip` on its own only searches for `requirements.txt` or
+`pyproject.toml`. Because our file is named `requirements-dev.txt`, we point
+`cache-dependency-path` straight at it — otherwise the step fails with *"No file
+… matched to [**/requirements.txt or **/pyproject.toml]"*. Now the cache is keyed
+on `requirements-dev.txt`, so unchanged deps are restored instantly.
 
 **2. JUnit + resilient upload (in `test`):**
 
